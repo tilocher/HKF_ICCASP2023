@@ -55,4 +55,4 @@ class MIT_BIH_DataLoader(BaseECGLoader):
         return self.mit_labels
 
     def __len__(self):
-        return 42
+        return 420

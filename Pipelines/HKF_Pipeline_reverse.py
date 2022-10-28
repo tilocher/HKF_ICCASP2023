@@ -7,8 +7,11 @@ from PriorModels.BasePrior import BasePrior
 from Dataloaders.BaseDataLoader import BaseECGLoader
 from torch.utils.data.dataloader import DataLoader
 from SystemModels.BaseSysmodel import BaseSystemModel
+from SystemModels.ExtendedSysmodel import ExtendedSystemModel
 from tqdm import tqdm
 from utils.Stich import stich
+from Filters.KalmanSmoother import KalmanSmoother
+
 
 
 class HKF_Pipeline:
@@ -16,20 +19,21 @@ class HKF_Pipeline:
     def __init__(self, prior_model: BasePrior):
         self.prior_model = prior_model
 
+        # EM parameters
         self.em_vars = ('Q', 'R')
-
         self.em_iterations = 50
         self.convergence_threshold = 1e-5
-
         self.smoothing_window_Q = -1
         self.smoothing_window_R = -1
 
+        self.EM_filter_window = 10
+
+        # ML parameters
         self.n_residuals = 5
 
+        # Plot parameters
         self.number_sample_plots = 10
-
         self.show_results = False
-
         self.create_plot = True
 
     def fit_prior(self, prior_model: BasePrior, prior_set: BaseECGLoader) \
@@ -45,28 +49,7 @@ class HKF_Pipeline:
         sys_model = prior_model.get_sys_model()
 
         # Create Intra heartbeat model
-        intra_hkf = IntraHKF(sys_model, self.em_vars)
-
-        # Perform EM on prior set
-        for n_samples, (prior_set_observation, prior_set_state) in enumerate(prior_set):
-
-            if n_samples == 0:
-                torch.manual_seed(40)
-                q_2_init = torch.rand(1).item()
-                r_2_init = torch.rand(1).item()
-            else:
-                q_2_init = r_2_init = None
-
-            intra_hkf.em(observations=prior_set_observation,
-                         T=sys_model.T,
-                         q_2_init=q_2_init,
-                         r_2_init=r_2_init,
-                         num_its=self.em_iterations,
-                         states=prior_set_state,
-                         convergence_threshold=self.convergence_threshold,
-                         smoothing_window_Q=self.smoothing_window_Q,
-                         smoothing_window_R=self.smoothing_window_R
-                         )
+        intra_hkf = KalmanSmoother(sys_model, em_vars=('Q',))
 
         return sys_model, intra_hkf
 
@@ -106,7 +89,6 @@ class HKF_Pipeline:
 
     def run(self, prior_set: BaseECGLoader, test_set: BaseECGLoader) \
             -> (torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor):
-
         # Set up internal system model
         intra_sys_model, intra_HKF = self.fit_prior(self.prior_model, prior_set)
 
@@ -126,8 +108,9 @@ class HKF_Pipeline:
         losses_inter_filter = torch.empty(test_set_length, num_channels)
         loss_fn = torch.nn.MSELoss(reduction='mean')
 
-        # Initialize the internal smoother and the external filters
-        inter_HKFs = [InterHKF(m, self.em_vars) for _ in range(T)]
+        # Set up inter model
+        inter_model = ExtendedSystemModel(T=self.EM_filter_window, m=num_channels, n=num_channels)
+        inter_HKFs = [KalmanSmoother(inter_model, self.em_vars) for _ in range(T)]
 
         # Initial guess for the starting covariances
         torch.manual_seed(42)
@@ -135,49 +118,59 @@ class HKF_Pipeline:
         initial_r_2 = torch.rand(1).item()
 
         # Set up iteration counter
-        iterator = tqdm(test_set, desc='Hierarchical Kalman Filtering')
+        prior_dataloader = DataLoader(prior_set, batch_size=len(prior_set))
+        prior_observations, prior_state = next(iter(prior_dataloader))
+        prior_observations = prior_observations.transpose(0,1)
+        prior_state = prior_state.transpose(0,1)
+        test_iterator = tqdm(test_set, desc='Hierarchical Kalman Filtering')
 
-        for n, (observation, state) in enumerate(iterator):
+        for n, (observations, state) in enumerate(zip(prior_observations, prior_state)):
 
-            # Smooth internally with learned parameters
-            smoother_means, smoother_covariances = intra_HKF.smooth(observation, T)
+            kalman_smoother = inter_HKFs[n]
+            kalman_smoother.em(observations=observations,
+                               T=self.EM_filter_window,
+                               q_2_init=initial_q_2,
+                               r_2_init=initial_r_2,
+                               states=state,
+                               convergence_threshold=self.convergence_threshold,
+                               smoothing_window_Q=self.smoothing_window_Q,
+                               smoothing_window_R=self.smoothing_window_R)
+            kalman_smoother.R = kalman_smoother.R_arr.mean(1)
+            kalman_smoother.R_arr = None
 
-            # Set up means and covariances
-            smoother_means = smoother_means.reshape(T, m)
-            smoother_covariances = smoother_covariances.reshape(T, m, m)
+            kalman_smoother.Q = kalman_smoother.Q_arr.mean(1)
+            kalman_smoother.Q_arr = None
 
-            # Save to result array
-            intra_smoother_means[n] = smoother_means
+        for n, (observations, state) in enumerate(test_iterator):
 
-            # Calculate smoother loss
-            losses_intra_smoother[n] = loss_fn(intra_smoother_means[n], state)
+            if n==0:
+                intra_HKF.init_online(test_set_length)
+                intra_HKF.smooth(observations, T)
 
-            # External filter for each channel
-            for timestep, inter_HKF in enumerate(inter_HKFs):
+            inter_smoother_means = torch.empty(T, num_channels, 1)
+            inter_smoother_covariances = torch.empty(1, T, num_channels, num_channels)
 
-                # Initialize the filter for the first pass
+            for timestep, inter_filter in enumerate(inter_HKFs):
                 if n == 0:
-                    inter_HKF.init_online(test_set_length)
+                    inter_filter.init_online(test_set_length)
 
-                # Get internal smoother output as new input for the outer filter
-                channel_smoother_mean = smoother_means[timestep].reshape(m, 1)
-                # Get internal smoother covariance as estimate for the observation noise
-                channel_smoother_covariance = smoother_covariances[timestep]
+                inter_filter_mean = inter_filter.update_online(observations[timestep].unsqueeze(-1))
+                inter_smoother_means[timestep] = inter_filter_mean
+                inter_smoother_covariances[:,timestep] = inter_filter.Filtered_State_Covariance
 
-                # Update \mathcal{R}_\tau using smoother error covariance
-                inter_HKF.update_R(torch.eye(m) * channel_smoother_covariance)
-
-                # ML update \mathcal{Q}_\tau
-                inter_HKF.ml_update_q(channel_smoother_mean)
-
-                # Get the output of the external KF
-                inter_filter_mean = inter_HKF.update_online(channel_smoother_mean)
-
-                # Save to result array
                 inter_filter_means[n, timestep] = inter_filter_mean.squeeze()
 
-                # Calculate filter loss for channel
                 losses_inter_filter[n] = loss_fn(inter_filter_means[n, timestep], state[timestep])
+
+            intra_HKF.update_R(inter_smoother_covariances.mean(1))
+            # intra_HKF.ml_update_q(inter_smoother_means)
+            intra_HKF.em(inter_smoother_means.reshape(1,T,num_channels), T=T, q_2_init=0.1,r_2_init=0.1)
+            intra_smoother_mean, _ = intra_HKF.smooth(inter_smoother_means.reshape(1,T,num_channels), T)
+
+            # Save to result array
+            intra_smoother_means[n] = intra_smoother_mean.squeeze()
+
+            losses_intra_smoother[n] = loss_fn(intra_smoother_means[n], state)
 
         # Print losses
         mean_intra_loss = losses_intra_smoother.mean()
@@ -210,12 +203,14 @@ class HKF_Pipeline:
 
         return intra_smoother_means, inter_filter_means, losses_intra_smoother, losses_inter_filter.mean(-1)
 
+
     def plot_results(self,
                      observations: torch.Tensor,
                      states: torch.Tensor = None,
                      results: list = None,
                      labels: list = 'results',
-                     overlaps: list = None) -> None:
+                     overlaps: list = None) \
+            -> None:
 
         """
         Plot filtered samples as well as the observation and the state
@@ -471,3 +466,5 @@ class HKF_Pipeline:
         fig_con.savefig(f'Plots\\Consecutive_sample_plots.pdf')
 
         fig_con.show()
+
+

@@ -8,6 +8,7 @@ class InterHKF(KalmanFilter):
         self.m = T
         self.n = T
         self.Q = torch.eye(T)
+        self.R_history = None
         super(InterHKF, self).__init__(sys_model=None, em_vars=em_vars, n_residuals=n_residuals)
 
     def predict(self, t: int) -> None:
@@ -54,6 +55,7 @@ class InterHKF(KalmanFilter):
         self.Filtered_Residual = self.Observation - self.Filtered_State_Mean
 
     def update_R(self, R: torch.Tensor) -> None:
+        self.R_history[:, self.t] = R
         self.R = R
 
     def update_Q(self, Q: torch.Tensor) -> None:
@@ -89,4 +91,38 @@ class InterHKF(KalmanFilter):
         self.t += 1
 
         return self.Filtered_State_Mean
+
+    def init_online(self, T: int) -> None:
+        self.R_history = torch.empty(1, T, self.m, self.m)
+        super(InterHKF, self).init_online(T)
+
+    def ml_update_q(self, observation: torch.Tensor) -> None:
+
+
+        historic_R_mean = self.R_history[:,max(0, self.t - self.nResiduals): self.t + 1].mean(1)
+
+        # if self.t == 0:
+        #     historic_P_mean = self.Initial_State_Covariance
+        # else:
+        #     historic_P_mean = self.Filtered_State_Covariances[:, max(0, self.t - self.nResiduals): self.t].mean(1)
+        P = self.Filtered_State_Covariances[:, max(self.t - self.nResiduals, 0): self.t + 1]
+        P_current = self.Filtered_State_Covariance.unsqueeze(1)
+
+        P = torch.cat((P, P_current), dim=1).mean(1)
+        # Get the predicted residuals of the last nResidual time steps
+        rho = self.Predicted_Residuals[:, max(self.t - self.nResiduals, 0): self.t + 1]
+
+        rho_latest = (observation - self.Filtered_State_Mean).unsqueeze(0)
+
+        rho_mean = torch.cat((rho, rho_latest), dim=1).mean(1)
+
+        Q = torch.bmm(rho_mean, rho_mean.mT) - historic_R_mean - P
+
+        # Q = torch.zeros_like(Q)
+
+        if not torch.all(Q > 0):
+            Q = torch.zeros_like(Q)
+        self.update_Q(torch.clip(Q, 0 ))
+
+
 

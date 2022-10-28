@@ -146,7 +146,7 @@ class BaseECGLoader(Dataset):
             centered_states.append(torch.stack(sample_centered_states))
             overlaps.append(sample_overlaps)
 
-            return torch.cat(centered_observations), torch.cat(centered_states), overlaps
+        return torch.cat(centered_observations), torch.cat(centered_states), overlaps
 
     def __len__(self):
         return self.centered_states.shape[0]

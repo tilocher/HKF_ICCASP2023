@@ -34,6 +34,7 @@ class KalmanFilter:
 
         self.init_sequence()
 
+
     def f_batch(self, states: torch.Tensor, t: int) -> torch.Tensor:
         """
         Evaluate the state evolution function for a batch of states
@@ -426,7 +427,7 @@ class KalmanSmoother(KalmanFilter):
     def smooth(self, observations: torch.Tensor, T: int) -> (torch.Tensor, torch.Tensor):
         """
         Perform kalman smoothing on the given observations
-        :param observations: Tensor of observations
+        :param observations: Tensor of observations dimensions (batch_size, T , channels, 1)
         :param T: Time horizon
         :return: Smoothed state means
         """
@@ -509,8 +510,10 @@ class KalmanSmoother(KalmanFilter):
         """
 
         # Set initial covariance estimates
-        self.update_Q(q_2_init * torch.eye(self.m))
-        self.update_R(r_2_init * torch.eye(self.n))
+        if q_2_init is not None:
+            self.update_Q(q_2_init * torch.eye(self.m))
+        if r_2_init is not None:
+            self.update_R(r_2_init * torch.eye(self.n))
 
         # Set up iteration counter
         iteration_counter = trange(num_its, desc='EM optimization steps')
@@ -715,6 +718,7 @@ class KalmanSmoother(KalmanFilter):
 
             FVF = torch.einsum('Bmp,Bpk,Bkn->Bmn', (F, V_xx, F.mT))
             Q_arr = V_x1x1 - FV_xx1 - FV_xx1.mT + FVF
+            Q_arr = torch.clip(Q_arr, 0)
             Q_arr = Q_arr.repeat(1, self.ssModel.T, 1, 1)
 
         # Average over given window size
