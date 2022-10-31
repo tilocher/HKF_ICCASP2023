@@ -5,7 +5,7 @@ from Filters.IntraHKF import IntraHKF
 from Filters.InterHKF import InterHKF
 from PriorModels.BasePrior import BasePrior
 from Dataloaders.BaseDataLoader import BaseECGLoader
-from torch.utils.data.dataloader import DataLoader, Dataset
+from torch.utils.data.dataloader import DataLoader
 from SystemModels.BaseSysmodel import BaseSystemModel
 from SystemModels.ExtendedSysmodel import ExtendedSystemModel
 from tqdm import tqdm
@@ -89,21 +89,15 @@ class HKF_Pipeline:
 
     def run(self, prior_set: BaseECGLoader, test_set: BaseECGLoader) \
             -> (torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor):
-
-
+        # Set up internal system model
+        intra_sys_model, intra_HKF = self.fit_prior(self.prior_model, prior_set)
 
         # Get parameters
         test_set_length = len(test_set)
-        prior_set_length = len(prior_set)
-
-        T, m = prior_set[0][0].shape
+        T = intra_sys_model.T
+        m = intra_sys_model.m
+        n = intra_sys_model.n
         num_channels = m
-
-        # Set up internal system model
-        intra_sys_model, intra_HKF = self.fit_prior(self.prior_model, prior_set)
-        intra_sys_model.generate_sequence(T)
-        plt.plot(intra_sys_model.x[:,0])
-        plt.show()
 
         # Set up data arrays
         intra_smoother_means = torch.empty(test_set_length, T, m)
@@ -115,7 +109,7 @@ class HKF_Pipeline:
         loss_fn = torch.nn.MSELoss(reduction='mean')
 
         # Set up inter model
-        inter_model = ExtendedSystemModel(T=prior_set_length, m=num_channels, n=num_channels)
+        inter_model = ExtendedSystemModel(T=self.EM_filter_window, m=num_channels, n=num_channels)
         inter_HKFs = [KalmanSmoother(inter_model, self.em_vars) for _ in range(T)]
 
         # Initial guess for the starting covariances
@@ -134,7 +128,7 @@ class HKF_Pipeline:
 
             kalman_smoother = inter_HKFs[n]
             kalman_smoother.em(observations=observations,
-                               T=prior_set_length,
+                               T=self.EM_filter_window,
                                q_2_init=initial_q_2,
                                r_2_init=initial_r_2,
                                states=state,
@@ -149,10 +143,9 @@ class HKF_Pipeline:
 
         for n, (observations, state) in enumerate(test_iterator):
 
-            if n == 0:
+            if n==0:
                 intra_HKF.init_online(test_set_length)
                 intra_HKF.smooth(observations, T)
-
 
             inter_smoother_means = torch.empty(T, num_channels, 1)
             inter_smoother_covariances = torch.empty(1, T, num_channels, num_channels)
@@ -169,12 +162,9 @@ class HKF_Pipeline:
 
                 losses_inter_filter[n] = loss_fn(inter_filter_means[n, timestep], state[timestep])
 
-
-
-            mean_observation_covariance = inter_smoother_covariances.mean(1)
-            intra_HKF.update_R(0.5 * mean_observation_covariance + 0.5 * mean_observation_covariance.mT)
-            intra_HKF.ml_update_q(inter_smoother_means)
-            # intra_HKF.em(inter_smoother_means.reshape(1,T,num_channels), T=T, q_2_init=0.1,r_2_init=0.1)
+            intra_HKF.update_R(inter_smoother_covariances.mean(1))
+            # intra_HKF.ml_update_q(inter_smoother_means)
+            intra_HKF.em(inter_smoother_means.reshape(1,T,num_channels), T=T, q_2_init=0.1,r_2_init=0.1)
             intra_smoother_mean, _ = intra_HKF.smooth(inter_smoother_means.reshape(1,T,num_channels), T)
 
             # Save to result array

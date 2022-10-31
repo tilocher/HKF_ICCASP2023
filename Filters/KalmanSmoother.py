@@ -172,7 +172,7 @@ class KalmanFilter:
         if self.H_em:
             self.H = self.H_arr[t]
         else:
-            self.H = torch.stack([self.ssModel.get_h_jacobian(state, t) for state in self.Filtered_State_Mean])
+            self.H = torch.stack([self.ssModel.get_f_jacobian(state, t) for state in self.Filtered_State_Mean])
 
     def predict(self, t: int):
         """
@@ -516,7 +516,7 @@ class KalmanSmoother(KalmanFilter):
             self.update_R(r_2_init * torch.eye(self.n))
 
         # Set up iteration counter
-        # iteration_counter = trange(num_its, desc='EM optimization steps')
+        iteration_counter = trange(num_its, desc='EM optimization steps')
 
         # If labels are available, calculate the loss
         losses = []
@@ -525,7 +525,7 @@ class KalmanSmoother(KalmanFilter):
             states = states.squeeze()
 
         # Start iteration
-        for n in range(num_its):
+        for n in iteration_counter:
 
             # E-Step
             self.smooth(observations, T)
@@ -572,14 +572,13 @@ class KalmanSmoother(KalmanFilter):
 
             # Update iteration counter
             if states != None:
-                pass
-                # loss = loss_fn(self.h_batch(self.Smoothed_State_Means.squeeze(), 0).squeeze(), states.squeeze())
-                # losses.append(10 * torch.log10(loss))
-                # iteration_counter.set_description('EM Iteration loss: {} [dB]'.format(10 * torch.log10(loss).item()))
+                loss = loss_fn(self.h_batch(self.Smoothed_State_Means.squeeze(), 0).squeeze(), states.squeeze())
+                losses.append(10 * torch.log10(loss))
+                iteration_counter.set_description('EM Iteration loss: {} [dB]'.format(10 * torch.log10(loss).item()))
 
             # Check for convergence
             if all([self.__getattribute__(f'{i}_diff') < convergence_threshold for i in self.em_vars]):
-                # print('Converged')
+                print('Converged')
                 break
 
         if states != None:
