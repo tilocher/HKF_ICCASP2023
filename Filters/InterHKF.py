@@ -35,7 +35,10 @@ class InterHKF(KalmanFilter):
         :return: None
         """
         # Compute Kalman Gain
-        self.KG = torch.linalg.pinv(self.Predicted_Observation_Covariance) # Assumes Q,R,P to be diagonal
+        try:
+            self.KG = torch.linalg.pinv(self.Predicted_Observation_Covariance) # Assumes Q,R,P to be diagonal
+        except torch.linalg.LinAlgError:
+            self.KG = torch.zeros_like(self.Predicted_Observation_Covariance)
         # self.KG = torch.diag_embed(self.KG)
         self.KG = torch.bmm(self.Predicted_State_Covariance, self.KG)
 
@@ -117,6 +120,8 @@ class InterHKF(KalmanFilter):
         rho_mean = torch.cat((rho, rho_latest), dim=1).mean(1)
 
         Q = torch.bmm(rho_mean, rho_mean.mT) - historic_R_mean - P
+
+        Q = 0.5 * Q + 0.5 * Q.mT
 
         # Q = torch.zeros_like(Q)
 

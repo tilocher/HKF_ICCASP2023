@@ -49,7 +49,7 @@ class MIT_BIH_DataLoader(BaseECGLoader):
         # Convert to torch tensor
         dataset = torch.tensor(np.array(dataset)).float()
 
-        return dataset, samples_per_second
+        return dataset[:,:,0].reshape(1,-1,1), samples_per_second
 
     def find_peaks(self, observations: torch.Tensor) -> list:
         return self.mit_labels
